@@ -57,6 +57,9 @@ You can use the same script to manage your Frigate instance:
 •	sudo ./frigate_installer.sh config
 
 
+Installations only contains one sample camera to get your frigate nvr running. You can edit after the fact and add your cameras. This oftens eliminates the issue that some have with a corrupted config file and are unable to run dfrigate nvr.
+
+
 Screenshots:
 
 
@@ -67,6 +70,8 @@ Screenshots:
 <img width="1899" height="1025" alt="image" src="https://github.com/user-attachments/assets/767b0c56-1c0b-4718-bc41-0c4c34250890" />
 
 <img width="1348" height="496" alt="image" src="https://github.com/user-attachments/assets/2f146f9c-4fe4-41e4-926b-20a80f1fe9f6" />
+
+<img width="723" height="486" alt="image" src="https://github.com/user-attachments/assets/80da09c1-c8fb-43af-9f8f-27b68d8afa8a" />
 
 
 
