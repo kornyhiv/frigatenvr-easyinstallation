@@ -10,8 +10,8 @@ COLOR_HEADER=$'\e[1;33m'  # Bold yellow for headers
 COLOR_INFO=$'\e[32m'      # Green for info
 COLOR_SUCCESS=$'\e[1;32m' # Bold green for success
 COLOR_WARN=$'\e[33m'      # Yellow for warnings
-COLOR_PROMPT=$'\e[33m'    # Yellow for prompts
-COLOR_ERROR=$'\e[31m'     # Red for errors
+COLOR_PROMPT=$'\e[33m'     # Yellow for prompts
+COLOR_ERROR=$'\e[31m'      # Red for errors
 
 # Function for section headers
 section_header() {
@@ -42,14 +42,14 @@ error_msg() {
 
 # ASCII art for Frigate (colored green)
 echo -e "${COLOR_GREEN}
-  ______                  _____           _        _ _       _   _
- |  ____|                |_   _|         | |      | | |     | | (_)
- | |__   __ _ ___ _   _    | |  _ __  ___| |_ __ _| | | __ _| |_ _  ___  _ __
- |  __| / _\` / __| | | |   | | | '_ \/ __| __/ _\` | | |/ _\` | __| |/ _ \| '_ \
- | |___| (_| \__ \ |_| |  _| |_| | | \__ \ || (_| | | | (_| | |_| | (_) | | | |
+  ______                _____             _     _ _     _   _
+ |  ____|              |_   _|           | |   | | |   | | (_)
+ | |__   __ _ ___ _   _   | |  _ __  ___| |_ __ _| | | __ _| |_ _  ___  _ __
+ |  __| / _\` / __| | | |  | | | '_ \/ __| __/ _\` | | |/ _\` | __| |/ _ \| '_ \
+ | |___| (_| \__ \ |_| | _| |_| | | \__ \ || (_| | | | (_| | |_| | (_) | | | |
  |______\__,_|___/\__, | |_____|_| |_|___/\__\__,_|_|_|\__,_|\__|_|\___/|_| |_|
-                   __/ |     
-                  |___/      
+                   __/ |
+                  |___/
 ${COLOR_RESET}" >&2
 
 SETTINGS_FILE="./frigate_installation_settings"
@@ -488,33 +488,37 @@ get_rtsp_password() {
 
 # Function to pull Frigate image
 pull_frigate_image() {
-  load_configuration
-  section_header "Pulling Frigate Docker Image"
+    load_configuration
+    section_header "Pulling Frigate Docker Image"
 
-  # Fetch the latest beta version tag
-  info_msg "Fetching the latest Frigate beta version..."
-  LATEST_BETA_TAG=$(curl -s "https://api.github.com/repos/blakeblackshear/frigate/releases" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
+    if [ -z "$FRIGATE_VERSION" ]; then
+        DEFAULT_VERSION="stable"
+        info_msg "You can specify a version (e.g., 0.13.2), a commit hash, or use 'stable'."
+        read -p "${COLOR_PROMPT}Enter the Frigate version tag to install (default: ${DEFAULT_VERSION}): ${COLOR_RESET}" user_version
+        # Use the user's input, or the default if they just press Enter
+        FRIGATE_VERSION="${user_version:-$DEFAULT_VERSION}"
 
-  if [ -z "$LATEST_BETA_TAG" ] || [ "$LATEST_BETA_TAG" == "null" ]; then
-    error_msg "Error fetching the latest beta version tag. Exiting."
-    exit 1
-  fi
-  
-  # The image tag does not have a 'v' prefix, but the GitHub tag does. Remove it.
-  LATEST_BETA_VERSION=$(echo "$LATEST_BETA_TAG" | sed 's/^v//')
+        if [ -z "$FRIGATE_VERSION" ]; then
+            error_msg "Frigate version cannot be empty. Exiting."
+            exit 1
+        fi
 
-  success_msg "Latest Frigate beta version: $LATEST_BETA_VERSION"
+        # Save the selected version for future runs
+        sed -i "/^FRIGATE_VERSION=/d" "$SETTINGS_FILE"
+        echo "FRIGATE_VERSION=\"$FRIGATE_VERSION\"" >> "$SETTINGS_FILE"
+    fi
 
-  # FIX: Use the -tensorrt image for NVIDIA GPUs with ONNX detector
-  if [ "$USE_GPU" = true ]; then
-    FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${LATEST_BETA_VERSION}-tensorrt"
-  else
-    FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${LATEST_BETA_VERSION}"
-  fi
+    success_msg "Preparing to install Frigate version: $FRIGATE_VERSION"
 
-  info_msg "Pulling Frigate image: $FRIGATE_IMAGE"
-  docker pull "$FRIGATE_IMAGE" || { error_msg "Error pulling Frigate image. Exiting."; exit 1; }
-  success_msg "Frigate image pulled successfully."
+    if [ "$USE_GPU" = true ]; then
+        FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}-tensorrt"
+    else
+        FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}"
+    fi
+
+    info_msg "Pulling Frigate image: $FRIGATE_IMAGE"
+    docker pull "$FRIGATE_IMAGE" || { error_msg "Error pulling Frigate image. Please check that the version '$FRIGATE_VERSION' exists. Exiting."; exit 1; }
+    success_msg "Frigate image pulled successfully."
 }
 
 # Function to create Frigate configuration file with detector type
@@ -776,6 +780,13 @@ start_frigate_container() {
   section_header "Starting Frigate Container"
 
   info_msg "Running Frigate NVR container..."
+  
+  # Fetch the Docker image name from the saved settings
+  if [ "$USE_GPU" = true ]; then
+      FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}-tensorrt"
+  else
+      FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}"
+  fi
 
   # Check if the container already exists
   if docker ps -a --format '{{.Names}}' | grep -q '^frigate$'; then
@@ -822,8 +833,8 @@ start_frigate_container() {
   eval "$DOCKER_RUN_COMMAND" || { error_msg "Error starting Frigate container. Exiting."; exit 1; }
   success_msg "Frigate container started."
 
-  info_msg "Waiting 60 seconds for container to initialize..."
-  sleep 60
+  info_msg "Waiting 30 seconds for container to initialize..."
+  sleep 30
 
   section_header "Frigate Container Logs (Last 50 Lines)"
   docker logs --tail 50 frigate
