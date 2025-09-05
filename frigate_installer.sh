@@ -40,16 +40,16 @@ error_msg() {
   echo -e "${COLOR_ERROR}[ERROR] $1${COLOR_RESET}" >&2
 }
 
-# ASCII art for Frigate (colored green)
+# ASCII art for Easy Installation
 echo -e "${COLOR_GREEN}
-  ______                _____             _     _ _     _   _
- |  ____|              |_   _|           | |   | | |   | | (_)
- | |__   __ _ ___ _   _   | |  _ __  ___| |_ __ _| | | __ _| |_ _  ___  _ __
- |  __| / _\` / __| | | |  | | | '_ \/ __| __/ _\` | | |/ _\` | __| |/ _ \| '_ \
- | |___| (_| \__ \ |_| | _| |_| | | \__ \ || (_| | | | (_| | |_| | (_) | | | |
- |______\__,_|___/\__, | |_____|_| |_|___/\__\__,_|_|_|\__,_|\__|_|\___/|_| |_|
-                   __/ |
-                  |___/
+  ______           _______     __  _____ _   _  _____ _______       _      _            _______ _____ ____  _   _ 
+ |  ____|   /\    / ____\ \   / / |_   _| \ | |/ ____|__   __|/\   | |    | |        /\|__   __|_   _/ __ \| \ | |
+ | |__     /  \  | (___  \ \_/ /    | | |  \| | (___    | |  /  \  | |    | |       /  \  | |    | || |  | |  \| |
+ |  __|   / /\ \  \___ \  \   /     | | | . ` |\___ \   | | / /\ \ | |    | |      / /\ \ | |    | || |  | | . ` |
+ | |____ / ____ \ ____) |  | |     _| |_| |\  |____) |  | |/ ____ \| |____| |____ / ____ \| |   _| || |__| | |\  |
+ |______/_/    \_\_____/   |_|    |_____|_| \_|_____/   |_/_/    \_\______|______/_/    \_\_|  |_____\____/|_| \_|
+                                                                                                                  
+                                                                                                                  
 ${COLOR_RESET}" >&2
 
 SETTINGS_FILE="./frigate_installation_settings"
@@ -58,9 +58,10 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # Function to prompt user for folder path
 prompt_for_folder() {
   local folder_type="$1"
-  read -p "${COLOR_PROMPT}Enter the folder path for ${folder_type} folder: ${COLOR_RESET}" folder_path >&2
+  local prompt_message="$2"
+  read -p "${COLOR_PROMPT}${prompt_message}${COLOR_RESET}" folder_path >&2
   if [ -z "$folder_path" ]; then
-    error_msg "Folder path cannot be empty. Exiting."
+    error_msg "Path cannot be empty. Exiting."
     exit 1
   fi
   if [[ ! "$folder_path" = /* ]]; then
@@ -316,13 +317,47 @@ load_configuration() {
   fi
 }
 
+# Function to get storage type
+get_storage_type() {
+    load_configuration
+    if [ -z "$USE_USB_DRIVE" ]; then
+        section_header "Configuring Storage Type"
+        read -p "${COLOR_PROMPT}Will an external USB drive be used for the storage media folder? (yes/no): ${COLOR_RESET}" use_usb
+        case "$use_usb" in
+            yes)
+                USE_USB_DRIVE=true
+                ;;
+            no)
+                USE_USB_DRIVE=false
+                ;;
+            *)
+                error_msg "Invalid option. Exiting."
+                exit 1
+                ;;
+        esac
+        sed -i "/^USE_USB_DRIVE=/d" "$SETTINGS_FILE"
+        echo "USE_USB_DRIVE=\"$USE_USB_DRIVE\"" >> "$SETTINGS_FILE"
+        success_msg "External USB drive usage set to: $USE_USB_DRIVE"
+    else
+        info_msg "Using external USB drive setting: $USE_USB_DRIVE"
+    fi
+}
+
 # Function to get media folder
 get_media_folder() {
   load_configuration
 
+  if [ "$USE_USB_DRIVE" = true ]; then
+    section_header "Configuring Media Folder"
+    info_msg "External USB drive selected. The path will be set to /mnt/usb/media"
+    # The docker run command will handle this path directly.
+    return
+  fi
+
+  # This logic only runs if not using an external USB drive.
   if [ -z "$MEDIA_FOLDER" ] || [ ! -d "$MEDIA_FOLDER" ]; then
     section_header "Configuring Media Folder"
-    MEDIA_FOLDER=$(prompt_for_folder "Media")
+    MEDIA_FOLDER=$(prompt_for_folder "Media" "Enter the folder path for Media folder: ")
     sed -i "/^MEDIA_FOLDER=/d" "$SETTINGS_FILE"
     echo "MEDIA_FOLDER=\"$MEDIA_FOLDER\"" >> "$SETTINGS_FILE"
     success_msg "Media folder set to: $MEDIA_FOLDER"
@@ -484,6 +519,26 @@ get_rtsp_password() {
   else
     info_msg "Using existing RTSP password from configuration."
   fi
+}
+
+# Function to get Frigate+ API key
+get_plus_api_key() {
+    load_configuration
+    if [ -z "$PLUS_API_KEY" ]; then
+        section_header "Configuring Frigate+ API Key"
+        read -p "${COLOR_PROMPT}Enter your Frigate+ API key (optional, press Enter to skip): ${COLOR_RESET}" user_api_key
+        if [ -n "$user_api_key" ]; then
+            PLUS_API_KEY="$user_api_key"
+            success_msg "Frigate+ API key has been set."
+        else
+            PLUS_API_KEY="cde870a5-7d85" # Default example key
+            info_msg "No Frigate+ API key entered. Using an example key. This can be changed later."
+        fi
+        sed -i "/^PLUS_API_KEY=/d" "$SETTINGS_FILE"
+        echo "PLUS_API_KEY=\"$PLUS_API_KEY\"" >> "$SETTINGS_FILE"
+    else
+        info_msg "Using existing Frigate+ API key from configuration."
+    fi
 }
 
 # Function to pull Frigate image
@@ -649,16 +704,19 @@ toothbrush
 EOF
 
   elif [ "$USE_CORAL" = true ]; then
+    # Download the labelmap file for Coral if it doesn't exist
+    LABELMAP_FILE="$CONFIG_FOLDER/coco_labels.txt"
+    if [ ! -f "$LABELMAP_FILE" ]; then
+        info_msg "Downloading Coral labelmap file..."
+        curl -sL https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt -o "$LABELMAP_FILE" || { error_msg "Failed to download Coral labelmap. Exiting."; exit 1; }
+        success_msg "Coral labelmap downloaded to $LABELMAP_FILE"
+    fi
+
     detector_section="
   coral:
     type: edgetpu
     device: usb:0"
-    model_section="
-model:
-  path: https://github.com/google-coral/edgetpu/raw/master/test_data/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite
-  labelmap_path: https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt
-  width: 300
-  height: 300"
+    model_section=""
   else
     detector_section="
   cpu:
@@ -780,7 +838,7 @@ start_frigate_container() {
   section_header "Starting Frigate Container"
 
   info_msg "Running Frigate NVR container..."
-  
+ 
   # Fetch the Docker image name from the saved settings
   if [ "$USE_GPU" = true ]; then
       FRIGATE_IMAGE="ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}-tensorrt"
@@ -802,15 +860,29 @@ start_frigate_container() {
   fi
 
   info_msg "Creating and starting Frigate container..."
+  # Base docker run command
   DOCKER_RUN_COMMAND="docker run -d \
     --name frigate \
     --restart=unless-stopped \
     --mount type=tmpfs,target=/tmp/cache,tmpfs-size=1000000000 \
     --network=host \
-    -v \"$SCRIPT_DIR/config:/config:rw\" \
-    -v \"$MEDIA_FOLDER:/media/frigate:rw\" \
+    -v \"$SCRIPT_DIR/config:/config:rw\""
+
+  # Conditionally add media folder volume mount
+  if [ "$USE_USB_DRIVE" = true ]; then
+      info_msg "Ensuring USB media directory exists at /mnt/usb/media"
+      mkdir -p "/mnt/usb/media" || { error_msg "Could not create /mnt/usb/media. Check permissions."; exit 1; }
+      DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
+    -v \"/mnt/usb/media:/media:rw\""
+  else
+      DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
+    -v \"$MEDIA_FOLDER:/media/frigate:rw\""
+  fi
+
+  # Add remaining docker run arguments
+  DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
     -v /etc/localtime:/etc/localtime:ro \
-    -e PLUS_API_KEY=\"cde870a5-7d85\" \
+    -e PLUS_API_KEY=\"$PLUS_API_KEY\" \
     -e FRIGATE_RTSP_PASSWORD=\"$RTSP_PASSWORD\" \
     --shm-size=1g \
     --privileged"
@@ -820,6 +892,12 @@ start_frigate_container() {
       --gpus all \
       -e NVIDIA_VISIBLE_DEVICES=all \
       -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
+  fi
+
+  if [ "$USE_USB_DRIVE" = true ]; then
+      # This ensures docker has access to USB devices on the host
+      DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
+      -v /dev/bus/usb:/dev/bus/usb"
   fi
 
   if [ "$USE_CORAL" = true ]; then
@@ -856,10 +934,12 @@ main() {
 
   if [ "$1" == "start" ]; then
     section_header "Starting Frigate Installation"
+    get_storage_type
     get_media_folder
     get_gpu_config
     get_coral
     get_rtsp_password
+    get_plus_api_key
 
     if [ "$USE_GPU" = true ]; then
       install_nvidia_dependencies
