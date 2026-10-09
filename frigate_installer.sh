@@ -636,9 +636,25 @@ get_rtsp_password() {
   fi
 }
 
+# Non-secret placeholder when the user skips Frigate+ (generated per install, never hardcoded)
+generate_plus_api_placeholder() {
+  if command -v openssl &>/dev/null; then
+    printf 'example-%s' "$(openssl rand -hex 16)"
+  else
+    printf 'example-%s-%s' "$(date +%s)" "$RANDOM$RANDOM"
+  fi
+}
+
 # Function to get Frigate+ API key
 get_plus_api_key() {
     load_configuration
+    _retired_plus_sha256="$(printf '%s' "$PLUS_API_KEY" | sha256sum | awk '{print $1}')"
+    if [ "$_retired_plus_sha256" = "802aaedf208072b2fa862785cb29c9940791b8c34c22a5b382925a3ec816467f" ]; then
+        warn_msg "Replacing retired example Frigate+ API key with a new random placeholder."
+        PLUS_API_KEY="$(generate_plus_api_placeholder)"
+        sed -i "/^PLUS_API_KEY=/d" "$SETTINGS_FILE"
+        echo "PLUS_API_KEY=\"$PLUS_API_KEY\"" >> "$SETTINGS_FILE"
+    fi
     if [ -z "$PLUS_API_KEY" ]; then
         section_header "Configuring Frigate+ API Key"
         read -p "${COLOR_PROMPT}Enter your Frigate+ API key (optional, press Enter to skip): ${COLOR_RESET}" user_api_key
@@ -646,8 +662,8 @@ get_plus_api_key() {
             PLUS_API_KEY="$user_api_key"
             success_msg "Frigate+ API key has been set."
         else
-            PLUS_API_KEY=""
-            info_msg "No Frigate+ API key entered. Using an example key. This can be changed later."
+            PLUS_API_KEY="$(generate_plus_api_placeholder)"
+            info_msg "No Frigate+ API key entered. Saved a random placeholder (not valid for Frigate+). Edit $SETTINGS_FILE to add your real key."
         fi
         sed -i "/^PLUS_API_KEY=/d" "$SETTINGS_FILE"
         echo "PLUS_API_KEY=\"$PLUS_API_KEY\"" >> "$SETTINGS_FILE"
