@@ -12,11 +12,11 @@ Features
 
 •	Automated Dependency Checks: Automatically installs Docker, Docker Buildx, NVIDIA drivers, CUDA, NVCC, and other required tools.
 
-•	Hardware Detection: Automatically detects NVIDIA GPUs for hardware acceleration.
+•	Hardware Detection: NVIDIA GPU (TensorRT), Google Coral USB, or Intel iGPU via OpenVINO (`/dev/dri`).
 
 •	Interactive Setup: Prompts the user for key configuration choices like media folder location and hardware usage.
 
-•	YOLOv9 Model Generation: Includes a built-in process to generate a YOLOv9 ONNX model for high-performance object detection on NVIDIA GPUs.
+•	YOLOv9 Model Generation: Builds a YOLOv9 ONNX model for NVIDIA ONNX or Intel OpenVINO detectors (pinned PyTorch/ONNX in Docker).
 
 •	Configuration Management: Creates a sensible default config.yml and manages settings through a simple settings file.
 

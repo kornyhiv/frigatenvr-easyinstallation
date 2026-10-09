@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Normalize Windows (CRLF) line endings when the script was cloned on Windows
+if grep -q $'\r' "$0" 2>/dev/null; then
+  sed -i 's/\r$//' "$0"
+  exec bash "$0" "$@"
+fi
+
 # Color definitions for professional output using ANSI C quoting for reliability
 COLOR_RESET=$'\e[0m'
 COLOR_BOLD=$'\e[1m'
@@ -38,6 +44,55 @@ warn_msg() {
 # Function for error messages
 error_msg() {
   echo -e "${COLOR_ERROR}[ERROR] $1${COLOR_RESET}" >&2
+}
+
+# Map Linux Mint / derivatives to the Ubuntu base codename Docker and CUDA expect
+resolve_apt_codename() {
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  if [ -f /etc/linuxmint/info ]; then
+    # shellcheck source=/dev/null
+    . /etc/linuxmint/info
+    if [ -n "${UBUNTU_CODENAME:-}" ]; then
+      echo "$UBUNTU_CODENAME"
+      return
+    fi
+  fi
+  echo "$VERSION_CODENAME"
+}
+
+resolve_cuda_distro() {
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  case "$ID" in
+    debian)
+      echo "debian${VERSION_ID}"
+      ;;
+    ubuntu)
+      echo "ubuntu$(echo "$VERSION_ID" | tr -d .)"
+      ;;
+    linuxmint)
+      # shellcheck source=/dev/null
+      . /etc/linuxmint/info
+      if [ -n "${UBUNTU_CODENAME:-}" ] && [ -n "${RELEASE:-}" ]; then
+        echo "ubuntu$(echo "$RELEASE" | tr -d .)"
+      else
+        echo "ubuntu$(lsb_release -rs 2>/dev/null | tr -d .)"
+      fi
+      ;;
+    *)
+      echo "ubuntu$(lsb_release -rs 2>/dev/null | tr -d .)"
+      ;;
+  esac
+}
+
+resolve_docker_os_id() {
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  case "$ID" in
+    debian) echo "debian" ;;
+    *) echo "ubuntu" ;;
+  esac
 }
 
 # ASCII art for Easy Installation
@@ -126,13 +181,15 @@ check_docker() {
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl
     sudo install -m 0755 -d /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    DOCKER_OS_ID="$(resolve_docker_os_id)"
+    APT_CODENAME="$(resolve_apt_codename)"
+    sudo curl -fsSL "https://download.docker.com/linux/${DOCKER_OS_ID}/gpg" -o /etc/apt/keyrings/docker.asc
     sudo chmod a+r /etc/apt/keyrings/docker.asc
 
     # Add the repository to Apt sources:
     echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DOCKER_OS_ID} \
+      ${APT_CODENAME} stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt-get update
 
@@ -211,10 +268,18 @@ install_nvidia_dependencies() {
     success_msg "NVIDIA drivers already installed and loaded. Skipping driver installation."
   else
     info_msg "Installing NVIDIA drivers..."
-    sudo apt update && sudo ubuntu-drivers autoinstall
-    if [ $? -ne 0 ]; then
-      error_msg "Error installing NVIDIA drivers. Exiting."
-      exit 1
+    if command -v ubuntu-drivers &>/dev/null; then
+      sudo apt update && sudo ubuntu-drivers autoinstall || {
+        error_msg "Error installing NVIDIA drivers. Exiting."
+        exit 1
+      }
+    else
+      warn_msg "ubuntu-drivers not found (common on Debian). Install NVIDIA drivers from your distro or NVIDIA, then re-run."
+      read -p "${COLOR_PROMPT}Continue after drivers are installed? (y/n): ${COLOR_RESET}" proceed_drivers
+      if [ "$proceed_drivers" != "y" ]; then
+        error_msg "Exiting installation."
+        exit 1
+      fi
     fi
 
     info_msg "Checking if NVIDIA driver is loaded..."
@@ -238,10 +303,17 @@ install_nvidia_dependencies() {
     success_msg "CUDA Toolkit already installed. Skipping."
   else
     info_msg "Installing CUDA Toolkit..."
-    DISTRO=ubuntu$(lsb_release -rs | tr -d .)
+    DISTRO="$(resolve_cuda_distro)"
     ARCH=x86_64
-    wget https://developer.download.nvidia.com/compute/cuda/repos/${DISTRO}/${ARCH}/cuda-keyring_1.1-1_all.deb
-    sudo dpkg -i cuda-keyring_1.1-1_all.deb
+    KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
+    KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${DISTRO}/${ARCH}/${KEYRING_DEB}"
+    info_msg "Using NVIDIA CUDA repo: ${DISTRO} (${KEYRING_URL})"
+    wget -q --show-progress -O "$KEYRING_DEB" "$KEYRING_URL" || {
+      error_msg "Failed to download CUDA keyring from ${KEYRING_URL}. Check resolve_cuda_distro / OS mapping."
+      exit 1
+    }
+    sudo dpkg -i "$KEYRING_DEB"
+    rm -f "$KEYRING_DEB"
     sudo apt update
     sudo apt install -y cuda-toolkit
     if [ $? -ne 0 ]; then
@@ -261,8 +333,13 @@ install_nvidia_dependencies() {
     success_msg "NVIDIA Container Toolkit already installed. Skipping."
   else
     info_msg "Installing NVIDIA Container Toolkit..."
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    NVIDIA_ARCH="$(dpkg --print-architecture)"
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+      || { error_msg "Failed to install NVIDIA Container Toolkit GPG key."; exit 1; }
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      | sed "s/\$(ARCH)/${NVIDIA_ARCH}/g" \
+      | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
     sudo apt update
     sudo apt install -y nvidia-container-toolkit
     if [ $? -ne 0 ]; then
@@ -436,20 +513,23 @@ generate_yolov9_model() {
     BUILD_DIR=$(mktemp -d)
     info_msg "Using temporary build directory: $BUILD_DIR"
 
-    # The docker build command provided in the Frigate documentation
-    # It builds the model in a container and exports the result to the specified directory
-    docker buildx build "$BUILD_DIR" --build-arg MODEL_SIZE="$YOLOV9_MODEL_SIZE" --output "$BUILD_DIR" -f- <<'EOF'
+    export DOCKER_BUILDKIT=1
+    docker buildx build "$BUILD_DIR" --no-cache --build-arg MODEL_SIZE="$YOLOV9_MODEL_SIZE" --output "$BUILD_DIR" -f- <<'EOF'
 FROM python:3.11 AS build
-RUN apt-get update && apt-get install --no-install-recommends -y libgl1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends -y cmake libgl1 && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.8.0 /uv /bin/
 WORKDIR /yolov9
-ADD https://github.com/WongKinYiu/yolov9.git .
+RUN git clone --depth 1 https://github.com/WongKinYiu/yolov9.git .
+RUN uv pip install --system torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cpu
+RUN sed -i '/torch/d' requirements.txt
+RUN sed -i '/torchvision/d' requirements.txt
 RUN uv pip install --system -r requirements.txt
-RUN uv pip install --system onnx onnxruntime onnx-simplifier>=0.4.1
+RUN uv pip install --system onnx==1.14.1 onnxruntime onnx-simplifier==0.4.36
 ARG MODEL_SIZE
-ADD https://github.com/WongKinYiu/yolov9/releases/download/v0.1/yolov9-${MODEL_SIZE}-converted.pt yolov9-${MODEL_SIZE}.pt
+ADD https://github.com/WongKinYiu/yolov9/releases/download/v0.1/yolov9-${MODEL_SIZE}.pt yolov9-${MODEL_SIZE}.pt
 RUN sed -i "s/ckpt = torch.load(attempt_download(w), map_location='cpu')/ckpt = torch.load(attempt_download(w), map_location='cpu', weights_only=False)/g" models/experimental.py
 RUN python3 export.py --weights ./yolov9-${MODEL_SIZE}.pt --imgsz 320 --simplify --include onnx
+RUN test -f /yolov9/yolov9-${MODEL_SIZE}.onnx
 FROM scratch
 ARG MODEL_SIZE
 COPY --from=build /yolov9/yolov9-${MODEL_SIZE}.onnx /
@@ -498,6 +578,41 @@ get_coral() {
     success_msg "Coral USB usage: $USE_CORAL"
   else
     info_msg "Using Coral usage: $USE_CORAL"
+  fi
+}
+
+# Function to get OpenVINO config (Intel iGPU)
+get_openvino() {
+  load_configuration
+
+  if [ -z "$USE_OPENVINO" ]; then
+    if [ "$USE_GPU" = true ] || [ "$USE_CORAL" = true ]; then
+      USE_OPENVINO=false
+      info_msg "OpenVINO iGPU option skipped because another detector is selected."
+      sed -i "/^USE_OPENVINO=/d" "$SETTINGS_FILE"
+      echo "USE_OPENVINO=\"$USE_OPENVINO\"" >> "$SETTINGS_FILE"
+      return
+    fi
+
+    section_header "Configuring Intel OpenVINO iGPU"
+    read -p "${COLOR_PROMPT}Do you want to use Intel iGPU with OpenVINO for detection? (yes/no): ${COLOR_RESET}" use_openvino
+    case "$use_openvino" in
+      yes)
+        USE_OPENVINO=true
+        ;;
+      no)
+        USE_OPENVINO=false
+        ;;
+      *)
+        error_msg "Invalid option. Exiting."
+        exit 1
+        ;;
+    esac
+    sed -i "/^USE_OPENVINO=/d" "$SETTINGS_FILE"
+    echo "USE_OPENVINO=\"$USE_OPENVINO\"" >> "$SETTINGS_FILE"
+    success_msg "OpenVINO iGPU usage: $USE_OPENVINO"
+  else
+    info_msg "Using OpenVINO usage: $USE_OPENVINO"
   fi
 }
 
@@ -606,7 +721,6 @@ create_frigate_config() {
     detector_section="
   onnx:
     type: onnx"
-    # FIX: Add model_type, input_dtype, and labelmap_path for generic YOLO models
     model_section="
 model:
   model_type: yolo-generic
@@ -617,7 +731,43 @@ model:
   input_dtype: float
   labelmap_path: /config/coco-80.txt"
 
-    # Create the labelmap file
+  elif [ "$USE_CORAL" = true ]; then
+    # Download the labelmap file for Coral if it doesn't exist
+    LABELMAP_FILE="$CONFIG_FOLDER/coco_labels.txt"
+    if [ ! -f "$LABELMAP_FILE" ]; then
+        info_msg "Downloading Coral labelmap file..."
+        curl -sL https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt -o "$LABELMAP_FILE" || { error_msg "Failed to download Coral labelmap. Exiting."; exit 1; }
+        success_msg "Coral labelmap downloaded to $LABELMAP_FILE"
+    fi
+
+    detector_section="
+  coral:
+    type: edgetpu
+    device: usb:0"
+    model_section=""
+  elif [ "$USE_OPENVINO" = true ]; then
+    MODEL_FILENAME="yolov9-${YOLOV9_MODEL_SIZE}.onnx"
+    detector_section="
+  openvino:
+    type: openvino
+    device: GPU"
+    model_section="
+model:
+  model_type: yolo-generic
+  path: /config/model_cache/$MODEL_FILENAME
+  width: 320
+  height: 320
+  input_tensor: nchw
+  input_dtype: float
+  labelmap_path: /config/coco-80.txt"
+  else
+    detector_section="
+  cpu:
+    type: cpu"
+    model_section=""
+  fi
+
+  if [ "$USE_GPU" = true ] || [ "$USE_OPENVINO" = true ]; then
     LABELMAP_FILE="$CONFIG_FOLDER/coco-80.txt"
     info_msg "Creating COCO labelmap file at $LABELMAP_FILE"
     cat <<EOF > "$LABELMAP_FILE"
@@ -702,26 +852,6 @@ teddy bear
 hair drier
 toothbrush
 EOF
-
-  elif [ "$USE_CORAL" = true ]; then
-    # Download the labelmap file for Coral if it doesn't exist
-    LABELMAP_FILE="$CONFIG_FOLDER/coco_labels.txt"
-    if [ ! -f "$LABELMAP_FILE" ]; then
-        info_msg "Downloading Coral labelmap file..."
-        curl -sL https://raw.githubusercontent.com/google-coral/test_data/master/coco_labels.txt -o "$LABELMAP_FILE" || { error_msg "Failed to download Coral labelmap. Exiting."; exit 1; }
-        success_msg "Coral labelmap downloaded to $LABELMAP_FILE"
-    fi
-
-    detector_section="
-  coral:
-    type: edgetpu
-    device: usb:0"
-    model_section=""
-  else
-    detector_section="
-  cpu:
-    type: cpu"
-    model_section=""
   fi
 
   # Start config file
@@ -829,7 +959,131 @@ EOF
     info_msg "Added Coral detectors."
   fi
 
+  if [ "$USE_OPENVINO" = true ]; then
+    cat <<EOF >> "$CONFIG_FILE"
+# For best YOLO models with OpenVINO, subscribe to Frigate+ and set model to plus://<model_id>
+# Recommended: YOLOv9 at 320x320 resolution (e.g., plus://yolov9-320)
+EOF
+  fi
+
   success_msg "Frigate config.yml created at $CONFIG_FILE"
+
+  if [ "$USE_OPENVINO" = true ]; then
+    info_msg "For best performance with OpenVINO on Intel iGPU, subscribe to Frigate+ for optimized YOLO models."
+    info_msg "Request YOLOv9 at 320x320 resolution when prompted during Frigate+ model selection."
+  fi
+}
+
+# Function to check and prevent orphaned media on startup
+check_orphaned_media_on_startup() {
+  load_configuration
+  local db_path="$SCRIPT_DIR/config/frigate.db"
+  local target_media_folder
+
+  if [ "$USE_USB_DRIVE" = true ]; then
+      target_media_folder="/mnt/usb/media"
+  elif [ -n "$MEDIA_FOLDER" ]; then
+      target_media_folder="$MEDIA_FOLDER"
+  else
+      return
+  fi
+
+  if [ ! -f "$db_path" ] && [ -d "$target_media_folder/recordings" ]; then
+      local existing_folders
+      existing_folders=$(sudo find "$target_media_folder/recordings" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+      if [ -n "$existing_folders" ]; then
+          section_header "Orphaned Media Warning"
+          warn_msg "Frigate database (frigate.db) not found, but old recordings exist in $target_media_folder/recordings."
+          warn_msg "If you proceed, Frigate will create a NEW database. It will NOT know about these old files."
+          warn_msg "Frigate's retention policy will NEVER delete them, eventually filling your drive up to 100%."
+          read -p "${COLOR_PROMPT}Do you want to PERMANENTLY DELETE these old, orphaned recordings to free up space? (yes/no): ${COLOR_RESET}" delete_orphans
+          if [ "$delete_orphans" == "yes" ]; then
+              info_msg "Deleting orphaned recordings and clips..."
+              sudo rm -rf "$target_media_folder/recordings/"*
+              sudo rm -rf "$target_media_folder/clips/"*
+              success_msg "Orphaned media deleted."
+          else
+              info_msg "Keeping existing media. You may run out of disk space!"
+          fi
+      fi
+  fi
+}
+
+# Function to manually clean up orphaned media files
+clean_orphaned_media() {
+  load_configuration
+  section_header "Cleaning Orphaned Media Files"
+
+  local target_media_folder
+  if [ "$USE_USB_DRIVE" = true ]; then
+      target_media_folder="/mnt/usb/media"
+  elif [ -n "$MEDIA_FOLDER" ]; then
+      target_media_folder="$MEDIA_FOLDER"
+  else
+      error_msg "Media folder not configured. Please run the start setup first."
+      return
+  fi
+
+  if [ ! -d "$target_media_folder/recordings" ]; then
+      info_msg "No recordings folder found at $target_media_folder/recordings. Nothing to clean."
+      return
+  fi
+
+  info_msg "Current storage space for $target_media_folder:"
+  df -h "$target_media_folder"
+
+  warn_msg "If Frigate's database was reset, old recordings are orphaned and won't be auto-deleted."
+
+  echo -e "${COLOR_INFO}Available recording folders:${COLOR_RESET}"
+  sudo ls -lh "$target_media_folder/recordings/"
+
+  read -p "${COLOR_PROMPT}Enter the exact date folder/prefix to delete (e.g., '2026-03' or '2026-04'), type 'all' to wipe everything, or press Enter to cancel: ${COLOR_RESET}" prefix_to_delete
+
+  if [ -z "$prefix_to_delete" ]; then
+      info_msg "Operation cancelled."
+      return
+  fi
+
+  if [ "$prefix_to_delete" == "all" ]; then
+      read -p "${COLOR_PROMPT}Are you sure you want to delete ALL recordings and clips? (yes/no): ${COLOR_RESET}" confirm_all
+      if [ "$confirm_all" == "yes" ]; then
+          info_msg "Deleting all recordings and clips..."
+          sudo rm -rf "$target_media_folder/recordings/"*
+          sudo rm -rf "$target_media_folder/clips/"*
+          success_msg "All media files deleted."
+      else
+          info_msg "Operation cancelled."
+      fi
+  else
+      info_msg "Deleting folders matching prefix: $prefix_to_delete"
+      sudo rm -rf "$target_media_folder/recordings/$prefix_to_delete"*
+      success_msg "Deleted matching recording folders."
+
+      if sudo ls "$target_media_folder/clips/$prefix_to_delete"* 1> /dev/null 2>&1; then
+         sudo rm -rf "$target_media_folder/clips/$prefix_to_delete"*
+         success_msg "Deleted matching clip files."
+      fi
+  fi
+
+  info_msg "Updated storage space:"
+  df -h "$target_media_folder"
+}
+
+# Upgrade Frigate image and recreate container (preserves config/ and settings)
+upgrade_frigate() {
+  load_configuration
+  section_header "Upgrading Frigate"
+  info_msg "Configuration and media paths are preserved. Only the container image is updated."
+  read -p "${COLOR_PROMPT}Enter Frigate version tag (default: ${FRIGATE_VERSION:-stable}): ${COLOR_RESET}" user_version
+  if [ -n "$user_version" ]; then
+    FRIGATE_VERSION="$user_version"
+    sed -i "/^FRIGATE_VERSION=/d" "$SETTINGS_FILE"
+    echo "FRIGATE_VERSION=\"$FRIGATE_VERSION\"" >> "$SETTINGS_FILE"
+  fi
+  ensure_docker_running
+  pull_frigate_image
+  start_frigate_container
+  success_msg "Frigate upgrade completed."
 }
 
 # Function to start Frigate container
@@ -864,7 +1118,7 @@ start_frigate_container() {
   DOCKER_RUN_COMMAND="docker run -d \
     --name frigate \
     --restart=unless-stopped \
-    --mount type=tmpfs,target=/tmp/cache,tmpfs-size=1000000000 \
+    --mount type=tmpfs,target=/tmp/cache,tmpfs-size=4000000000 \
     --network=host \
     -v \"$SCRIPT_DIR/config:/config:rw\""
 
@@ -873,7 +1127,7 @@ start_frigate_container() {
       info_msg "Ensuring USB media directory exists at /mnt/usb/media"
       mkdir -p "/mnt/usb/media" || { error_msg "Could not create /mnt/usb/media. Check permissions."; exit 1; }
       DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
-    -v \"/mnt/usb/media:/media:rw\""
+    -v \"/mnt/usb/media:/media/frigate:rw\""
   else
       DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
     -v \"$MEDIA_FOLDER:/media/frigate:rw\""
@@ -884,7 +1138,7 @@ start_frigate_container() {
     -v /etc/localtime:/etc/localtime:ro \
     -e PLUS_API_KEY=\"$PLUS_API_KEY\" \
     -e FRIGATE_RTSP_PASSWORD=\"$RTSP_PASSWORD\" \
-    --shm-size=1g \
+    --shm-size=2g \
     --privileged"
 
   if [ "$USE_GPU" = true ]; then
@@ -903,6 +1157,11 @@ start_frigate_container() {
   if [ "$USE_CORAL" = true ]; then
     DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
       --device /dev/bus/usb:/dev/bus/usb"
+  fi
+
+  if [ "$USE_OPENVINO" = true ]; then
+    DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
+      --device /dev/dri:/dev/dri"
   fi
 
   DOCKER_RUN_COMMAND="$DOCKER_RUN_COMMAND \
@@ -938,6 +1197,7 @@ main() {
     get_media_folder
     get_gpu_config
     get_coral
+    get_openvino
     get_rtsp_password
     get_plus_api_key
 
@@ -948,12 +1208,13 @@ main() {
     # Ensure Docker is running before proceeding with any docker commands
     ensure_docker_running
 
-    if [ "$USE_GPU" = true ]; then
+    if [ "$USE_GPU" = true ] || [ "$USE_OPENVINO" = true ]; then
       generate_yolov9_model
     fi
 
     pull_frigate_image
     create_frigate_config
+    check_orphaned_media_on_startup
     start_frigate_container
     success_msg "Frigate installation and configuration completed!"
     IP_ADDRESS=$(hostname -I | cut -d ' ' -f1)
@@ -967,8 +1228,13 @@ main() {
   elif [ "$1" == "config" ]; then
     create_frigate_config
     success_msg "Frigate config regenerated."
+  elif [ "$1" == "clean_media" ]; then
+    ensure_docker_running
+    clean_orphaned_media
+  elif [ "$1" == "upgrade" ]; then
+    upgrade_frigate
   else
-    error_msg "Usage: $0 {start|stop|delete|config}"
+    error_msg "Usage: $0 {start|stop|delete|config|clean_media|upgrade}"
     exit 1
   fi
 }
